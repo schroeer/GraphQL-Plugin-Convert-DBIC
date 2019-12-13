@@ -219,54 +219,31 @@ sub _make_fk_fields {
 sub field_resolver {
   my ($root_value, $args, $context, $info) = @_;
   my $field_name = $info->{field_name};
-  DEBUG and _debug('DBIC.resolver', $field_name, $args, $info);
   my $parent_name = $info->{parent_type}->name;
+  my $return_type_name = $info->{return_type}->name;
+  my $return_list = $info->{return_type}->isa('GraphQL::Type::List');
+  my $return_object = $info->{return_type}->isa('GraphQL::Type::Object') || ($return_list && $info->{return_type}->{of}->isa('GraphQL::Type::Object'));
+
   if ($parent_name eq 'Mutation') {
     goto &_mutation_resolver;
-  } elsif ($parent_name eq 'Query') {
-    goto &_query_resolver;
   }
-  my $property = ref($root_value) eq 'HASH'
-    ? $root_value->{$field_name}
-    : $root_value;
-  return $property->($args, $context, $info) if ref $property eq 'CODE';
-  return $property // die "DBIC.resolver could not resolve '$field_name'\n"
-    if ref $root_value eq 'HASH' or !$root_value->can($field_name);
-  return $root_value->$field_name($args, $context, $info)
-    if !UNIVERSAL::isa($root_value, 'DBIx::Class::Core');
-  # dbic search
-  my $rs = $root_value->$field_name;
-  $rs = [ $rs->all ] if $info->{return_type}->isa('GraphQL::Type::List');
-  return $rs;
-}
 
-sub _subfieldrels {
-  my ($field_node) = @_;
-  die "_subfieldrels called on non-field" if $field_node->{kind} ne 'field';
-  return {} unless my @sels = @{ $field_node->{selections} || [] };
-  return {} unless my @withsels = grep @{ $_->{selections} || [] }, @sels;
-  +{ map { $_->{name} => _subfieldrels($_) } @withsels };
-}
+  my $rs = ($parent_name eq 'Query') 
+    ? $root_value->resultset($return_type_name)
+    : $root_value->$field_name; # either resultset or scalar value
 
-sub _query_resolver {
-  my ($dbic_schema, $args, $context, $info) = @_;
-  my $name = $info->{return_type}->name;
-  my $method = $info->{return_type}->isa('GraphQL::Type::List')
-    ? 'search' : 'find';
-  my @subfieldrels = map _subfieldrels($_), @{$info->{field_nodes}};
-  $args = $args->{input} if ref $args->{input} eq 'HASH';
-  $args = +{ map { ("me.$_" => $args->{$_}) } keys %$args };
-  DEBUG and _debug('DBIC.root_value', $name, $method, $args, \@subfieldrels, $info);
-  my $rs = $dbic_schema->resultset($name);
-  my $result = $rs->$method(
-    $args,
-    {
-      prefetch => { map %$_, @subfieldrels },
-      result_class => 'DBIx::Class::ResultClass::HashRefInflator'
-    },
-  );
-  $result = [ $result->all ] if $method eq 'search';
-  $result;
+  if (keys %$args) {
+    $args = $args->{input} if ref $args->{input} eq 'HASH';
+    $args = { map { ("me.$_" => $args->{$_}) } keys %$args };
+    $rs = $rs->search($args);        
+  }
+
+  if ($return_object) {
+    $rs = $return_list
+      ? [ $rs->all ]
+      : $rs->single;
+  }
+  $rs;
 }
 
 sub _make_query_pk_field {
